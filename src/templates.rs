@@ -4,8 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use avro_rs::schema::{Name, RecordField, UnionSchema};
-use avro_rs::Schema;
+use apache_avro::schema::{Name, RecordField, UnionSchema};
+use apache_avro::Schema;
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use lazy_static::lazy_static;
 use serde_json::Value;
@@ -29,7 +29,7 @@ macro_rules! deser(
 "#;
 
 pub const RECORD_TERA: &str = "record.tera";
-pub const RECORD_TEMPLATE: &str = r#"
+pub const RECORD_TEMPLATE: &str = r##"
 {%- if doc %}
 {%- set doc_lines = doc | split(pat="\n") %}
 {%- for doc_line in doc_lines %}
@@ -62,6 +62,12 @@ deser!(nullable_{{ name|lower }}_{{ f }}, {{ type }}, {{ defaults[f] }});
 {%- endif %}
 {%- endfor %}
 
+impl {{ name }} {
+    pub fn schema() -> &'static str {
+        r#"{{ schema|json_encode }}"#
+    }
+}
+
 impl Default for {{ name }} {
     fn default() -> {{ name }} {
         {{ name }} {
@@ -71,7 +77,7 @@ impl Default for {{ name }} {
         }
     }
 }
-"#;
+"##;
 
 pub const ENUM_TERA: &str = "enum.tera";
 pub const ENUM_TEMPLATE: &str = r#"
@@ -165,7 +171,7 @@ fn sanitize(mut s: String) -> String {
     }
 }
 
-macro_rules! err(
+macro_rules! err (
     ($($arg:tt)*) => (Err(Error::Template(format!($($arg)*))))
 );
 
@@ -178,7 +184,7 @@ struct GenUnionVisitor {
 
 /// A helper struct for nested schema generation.
 ///
-/// Used to store inner schema String type so that outter schema String type can be created.
+/// Used to store inner schema String type so that outer schema String type can be created.
 #[derive(Debug)]
 pub struct GenState(HashMap<String, String>);
 
@@ -238,6 +244,7 @@ impl Templater {
         if let Schema::Fixed {
             name: Name { name, .. },
             size,
+            ..
         } = schema
         {
             let mut ctx = Context::new();
@@ -275,6 +282,7 @@ impl Templater {
                 .collect();
             ctx.insert("originals", &o);
             ctx.insert("symbols", &s);
+            ctx.insert("schema", schema);
             Ok(self.tera.render(ENUM_TERA, &ctx)?)
         } else {
             err!("Requires Schema::Enum, found {:?}", schema)?
@@ -296,6 +304,7 @@ impl Templater {
             let doc = if let Some(d) = doc { d } else { "" };
             ctx.insert("doc", doc);
             ctx.insert("derive_builders", &self.derive_builders);
+            ctx.insert("schema", schema);
 
             let mut f = Vec::new(); // field names;
             let mut t = HashMap::new(); // field name -> field type
@@ -378,14 +387,14 @@ impl Templater {
                     Schema::Duration => {
                         let default = self.parse_default(schema, gen_state, default.as_ref())?;
                         f.push(name_std.clone());
-                        t.insert(name_std.clone(), "avro_rs::Duration".to_string());
+                        t.insert(name_std.clone(), "apache_avro::Duration".to_string());
                         d.insert(name_std.clone(), default);
                     }
 
                     Schema::Decimal { .. } => {
                         let default = self.parse_default(schema, gen_state, default.as_ref())?;
                         f.push(name_std.clone());
-                        t.insert(name_std.clone(), "avro_rs::Decimal".to_string());
+                        t.insert(name_std.clone(), "apache_avro::Decimal".to_string());
                         d.insert(name_std.clone(), default);
                     }
 
@@ -455,6 +464,7 @@ impl Templater {
                     }
 
                     Schema::Null => err!("Invalid use of Schema::Null")?,
+                    Schema::Ref { .. } => err!("Invalid use of Schema::Ref")?,
                 };
             }
 
@@ -536,16 +546,21 @@ impl Templater {
                     } => {
                         format!("{f}({f})", f = sanitize(name.to_upper_camel_case()))
                     }
-                    Schema::Decimal { .. } => "Decimal(avro_rs::Decimal)".into(),
+                    Schema::Decimal { .. } => "Decimal(apache_avro::Decimal)".into(),
                     Schema::Uuid => "Uuid(uuid::Uuid)".into(),
                     Schema::Date => "Date(i32)".into(),
                     Schema::TimeMillis => "TimeMillis(i32)".into(),
                     Schema::TimeMicros => "TimeMicros(i64)".into(),
                     Schema::TimestampMillis => "TimestampMillis(i64)".into(),
                     Schema::TimestampMicros => "TimestampMicros(i64)".into(),
-                    Schema::Duration => "Duration(avro_rs::Duration)".into(),
+                    Schema::Duration => "Duration(apache_avro::Duration)".into(),
+
                     Schema::Null => err!(
                         "Invalid Schema::Null not in first position on an UnionSchema variants"
+                    )?,
+
+                    Schema::Ref { .. } => err!(
+                        "Schema::Ref not resolved"
                     )?,
                 };
                 symbols.push(symbol_str);
@@ -692,6 +707,7 @@ impl Templater {
                 Schema::Fixed {
                     name: Name { name: f_name, .. },
                     size,
+                    ..
                 } => match default {
                     Some(Value::String(s)) => {
                         let bytes = s.clone().into_bytes();
@@ -709,6 +725,7 @@ impl Templater {
             Schema::Fixed {
                 name: Name { name: f_name, .. },
                 size,
+                ..
             } => match default {
                 Some(Value::String(s)) => {
                     let bytes = s.clone().into_bytes();
@@ -762,6 +779,8 @@ impl Templater {
             Schema::Union(union) => self.union_default(union, gen_state, default)?,
 
             Schema::Null => err!("Invalid use of Schema::Null")?,
+
+            Schema::Ref { .. } => err!("Invalid use of Schema::Ref")?,
         };
 
         Ok(default_str)
@@ -909,8 +928,8 @@ pub(crate) fn array_type(inner: &Schema, gen_state: &GenState) -> Result<String>
         Schema::TimestampMicros => "Vec<i64>".into(),
 
         Schema::Uuid => "Vec<uuid::Uuid>".into(),
-        Schema::Decimal { .. } => "Vec<avro_rs::Decimal>".into(),
-        Schema::Duration { .. } => "Vec<avro_rs::Duration>".into(),
+        Schema::Decimal { .. } => "Vec<apache_avro::Decimal>".into(),
+        Schema::Duration { .. } => "Vec<apache_avro::Duration>".into(),
 
         Schema::Fixed {
             name: Name { name: f_name, .. },
@@ -920,7 +939,10 @@ pub(crate) fn array_type(inner: &Schema, gen_state: &GenState) -> Result<String>
             format!("Vec<{}>", f_name)
         }
 
-        Schema::Array(..) | Schema::Map(..) | Schema::Union(..) => {
+        Schema::Array(el) => format!("Vec<{}>", array_type(&el, gen_state)?).into(),
+        Schema::Map(el) => format!("Vec<{}>", map_type(&el, gen_state)?).into(),
+
+        Schema::Union(..) => {
             let nested_type = gen_state.get_type(inner).ok_or_else(|| {
                 Error::Template(format!(
                     "Didn't find schema {:?} in state {:?}",
@@ -940,6 +962,7 @@ pub(crate) fn array_type(inner: &Schema, gen_state: &GenState) -> Result<String>
         } => format!("Vec<{}>", &sanitize(name.to_upper_camel_case())),
 
         Schema::Null => err!("Invalid use of Schema::Null")?,
+        Schema::Ref {..} => err!("Invalid use of Schema::Ref")?,
     };
     Ok(type_str)
 }
@@ -966,8 +989,8 @@ pub(crate) fn map_type(inner: &Schema, gen_state: &GenState) -> Result<String> {
         Schema::TimestampMicros => map_of("i64"),
 
         Schema::Uuid => map_of("uuid::Uuid"),
-        Schema::Decimal { .. } => map_of("avro_rs::Decimal"),
-        Schema::Duration { .. } => map_of("avro_rs::Duration"),
+        Schema::Decimal { .. } => map_of("apache_avro::Decimal"),
+        Schema::Duration { .. } => map_of("apache_avro::Duration"),
 
         Schema::Fixed {
             name: Name { name: f_name, .. },
@@ -977,7 +1000,10 @@ pub(crate) fn map_type(inner: &Schema, gen_state: &GenState) -> Result<String> {
             map_of(&f_name)
         }
 
-        Schema::Array(..) | Schema::Map(..) | Schema::Union(..) => {
+        Schema::Array(el) => map_of(array_type(&el, gen_state)?.as_str()).into(),
+        Schema::Map(el) => map_of(map_type(&el, gen_state)?.as_str()).into(),
+
+        Schema::Union(..) => {
             let nested_type = gen_state.get_type(inner).ok_or_else(|| {
                 Error::Template(format!(
                     "Didn't find schema {:?} in state {:?}",
@@ -997,6 +1023,7 @@ pub(crate) fn map_type(inner: &Schema, gen_state: &GenState) -> Result<String> {
         } => map_of(&sanitize(name.to_upper_camel_case())),
 
         Schema::Null => err!("Invalid use of Schema::Null")?,
+        Schema::Ref {..} => err!("Invalid use of Schema::Ref")?,
     };
     Ok(type_str)
 }
@@ -1037,6 +1064,8 @@ fn union_enum_variant(schema: &Schema, gen_state: &GenState) -> Result<String> {
         Schema::Null => {
             err!("Invalid Schema::Null not in first position on an UnionSchema variants")?
         }
+
+        Schema::Ref  {.. } => err!("Schema::Ref not resolved")?,
     };
 
     Ok(variant_str)
@@ -1095,8 +1124,8 @@ pub(crate) fn option_type(inner: &Schema, gen_state: &GenState) -> Result<String
         Schema::TimestampMicros => "Option<i64>".into(),
 
         Schema::Uuid => "Option<uuid::Uuid>".into(),
-        Schema::Decimal { .. } => "Option<avro_rs::Decimal>".into(),
-        Schema::Duration { .. } => "Option<avro_rs::Duration>".into(),
+        Schema::Decimal { .. } => "Option<apache_avro::Decimal>".into(),
+        Schema::Duration { .. } => "Option<apache_avro::Duration>".into(),
 
         Schema::Fixed {
             name: Name { name: f_name, .. },
@@ -1106,7 +1135,10 @@ pub(crate) fn option_type(inner: &Schema, gen_state: &GenState) -> Result<String
             format!("Option<{}>", f_name)
         }
 
-        Schema::Array(..) | Schema::Map(..) | Schema::Union(..) => {
+        Schema::Array(el) => format!("Option<{}>", array_type(&el, gen_state)?.as_str()).into(),
+        Schema::Map(el) => format!("Option<{}>", map_type(&el, gen_state)?.as_str()).into(),
+
+        Schema::Union(..) => {
             let nested_type = gen_state.get_type(inner).ok_or_else(|| {
                 Error::Template(format!(
                     "Didn't find schema {:?} in state {:?}",
@@ -1126,6 +1158,7 @@ pub(crate) fn option_type(inner: &Schema, gen_state: &GenState) -> Result<String
         } => format!("Option<{}>", &sanitize(name.to_upper_camel_case())),
 
         Schema::Null => err!("Invalid use of Schema::Null")?,
+        Schema::Ref {..} => err!("Invalid use of Schema::Ref")?,
     };
     Ok(type_str)
 }

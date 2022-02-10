@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::prelude::*;
 
-use avro_rs::{schema::RecordField, Schema};
+use apache_avro::{schema::RecordField, Schema};
 
 use crate::error::{Error, Result};
 use crate::templates::*;
@@ -329,7 +329,7 @@ impl GeneratorBuilder {
 
 #[cfg(test)]
 mod tests {
-    use avro_rs::schema::Name;
+    use apache_avro::schema::Name;
 
     use super::*;
 

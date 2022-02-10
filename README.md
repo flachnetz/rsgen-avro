@@ -86,7 +86,7 @@ Various `Schema` sources can be used with `Generator`'s `.gen(..)` method:
 
 ```rust
 pub enum Source<'a> {
-    Schema(&'a avro_rs::Schema), // from re-exported `avro-rs` crate
+    Schema(&'a apache_avro::Schema), // from re-exported `avro-rs` crate
     SchemaStr(&'a str),          // schema as a json string
     GlobPattern(&'a str),        // pattern to schema files
 }
